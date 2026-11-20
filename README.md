@@ -6,7 +6,7 @@ An end-to-end **AI Video Forensics** desktop application designed to detect mani
 
 ## 🖥️ Application Preview
 
-<img width="2880" height="1819" alt="Screenshot (231)" src="https://github.com/user-attachments/assets/a41c92f9-4695-4f5f-bfb5-ee54f042539e" />
+![Uploading image.png…]()
 
 
 ---
@@ -31,3 +31,48 @@ Deepfake-Detection/
 ├── video_player.py      # Auxiliary video stream handling utilities
 ├── requirements.txt     # Python dependencies
 └── .gitignore           # Excludes large weights, datasets, and cache files
+```
+
+---
+
+## ⚙️ Installation & Setup
+
+### 1. Clone the Repository
+```bash
+git clone [https://github.com/8b3l/Deepfake-Detection.git](https://github.com/8b3l/Deepfake-Detection.git)
+cd Deepfake-Detection
+```
+
+### 2. Install Dependencies
+Make sure you have **Python 3.10+** installed, then run:
+```bash
+pip install -r requirements.txt
+```
+
+### 3. Download the Pre-trained Model Weights
+Because of file size limits, the trained model weights are hosted in the repository's **Releases** section:
+1. Go to the [**Releases (v1.0.0)**](https://github.com/8b3l/Deepfake-Detection/releases/tag/v1.0.0) page.
+2. Download **`Model.keras`** (`280 MB`).
+3. Place `Model.keras` directly inside the root `Deepfake-Detection/` folder alongside `app.py`.
+
+### 4. Run the Application
+```bash
+python app.py
+```
+
+---
+
+## 🛠️ Tech Stack
+
+* **Deep Learning & Vision:** TensorFlow, Keras, ResNet50, GRU, MTCNN, OpenCV, Pillow, NumPy
+* **User Interface:** CustomTkinter, Tkinter
+* **Language:** Python 3
+
+---
+
+## 👤 Author
+
+**Ammar Bassam Saleh**  
+Computer Engineering Graduate | AI & Machine Learning Engineer  
+* **GitHub:** [@8b3l](https://github.com/8b3l)  
+* **LinkedIn:** [linkedin.com/in/ammarsaleh11](https://www.linkedin.com/in/ammarsaleh11)
