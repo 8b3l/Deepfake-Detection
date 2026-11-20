@@ -9,6 +9,7 @@ An end-to-end **AI Video Forensics** desktop application designed to detect mani
 ![Uploading image.png…]()
 
 
+
 ---
 
 ## 🧠 Model Architecture & Pipeline
