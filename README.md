@@ -6,7 +6,7 @@ An end-to-end **AI Video Forensics** desktop application designed to detect mani
 
 ## 🖥️ Application Preview
 
-![Uploading image.png…]()
+<img width="2880" height="1819" alt="Screenshot (231)" src="https://github.com/user-attachments/assets/86f3b33e-ec71-4a05-b604-d476cc9c4a00" />
 
 
 
