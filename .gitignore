@@ -1,3 +1,8 @@
 __pycache__/
+.venv/
+.pytest_cache/
 *.keras
 *.mp4
+*.avi
+*.mov
+*.mkv
