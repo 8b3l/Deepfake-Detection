@@ -4,7 +4,7 @@ An end-to-end **AI Video Forensics** desktop application designed to detect mani
 
 ---
 
-## 🖥️ Application Preview
+##  Application Preview
 
 <img width="2880" height="1819" alt="Screenshot (231)" src="https://github.com/user-attachments/assets/86f3b33e-ec71-4a05-b604-d476cc9c4a00" />
 
@@ -12,7 +12,7 @@ An end-to-end **AI Video Forensics** desktop application designed to detect mani
 
 ---
 
-## 🧠 Model Architecture & Pipeline
+##  Model Architecture & Pipeline
 
 The system analyzes videos across both spatial (frame-level visual artifacts) and temporal (inter-frame motion inconsistencies) dimensions:
 
@@ -23,7 +23,7 @@ The system analyzes videos across both spatial (frame-level visual artifacts) an
 
 ---
 
-## 📁 Project Structure
+##  Project Structure
 
 ```text
 Deepfake-Detection/
@@ -36,7 +36,7 @@ Deepfake-Detection/
 
 ---
 
-## ⚙️ Installation & Setup
+##  Installation & Setup
 
 ### 1. Clone the Repository
 ```bash
@@ -63,7 +63,7 @@ python app.py
 
 ---
 
-## 🛠️ Tech Stack
+##  Tech Stack
 
 * **Deep Learning & Vision:** TensorFlow, Keras, ResNet50, GRU, MTCNN, OpenCV, Pillow, NumPy
 * **User Interface:** CustomTkinter, Tkinter
@@ -71,7 +71,7 @@ python app.py
 
 ---
 
-## 👤 Author
+##  Author
 
 **Ammar Bassam Saleh**  
 Computer Engineering Graduate | AI & Machine Learning Engineer  
