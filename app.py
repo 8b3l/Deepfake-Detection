@@ -1,12 +1,18 @@
-import os
+import logging
+import math
 import time
 import tkinter as tk
+from pathlib import Path
+from queue import Empty, Queue
 from threading import Thread
-from tkinter import filedialog
+from tkinter import filedialog, messagebox
 import cv2
 import customtkinter as ctk
 from PIL import Image, ImageTk
-from processor import classify_video
+from processor import AnalysisError, SEQUENCE_LENGTH, VideoAnalysis, classify_video
+
+
+LOGGER = logging.getLogger(__name__)
 
 # Configure CustomTkinter appearance
 ctk.set_appearance_mode("Dark")
@@ -43,13 +49,16 @@ class DeepFakeApp(ctk.CTk):
         self.video_path = None
         self.cap = None
         self.is_playing = False
-        self.after_id = None
+        self.playback_job = None
+        self.analysis_job = None
         self.fps = 30.0
-        self.total_frames = 0
         self.current_frame_pos = 0
         self.play_start_time = 0.0
         self.paused_elapsed = 0.0
+        self.preview_image = None
         self.photo_image = None
+        self.resume_after_analysis = False
+        self.analysis_events: Queue[tuple[str, str | VideoAnalysis]] = Queue()
 
         self.configure(fg_color=self.colors["bg"])
         self.protocol("WM_DELETE_WINDOW", self.on_closing)
@@ -140,9 +149,9 @@ class DeepFakeApp(ctk.CTk):
         ).pack(anchor="w", padx=15, pady=(12, 6))
 
         specs = [
-            "• Face Alignment: MTCNN",
-            "• Spatial Features: ResNet50",
-            "• Temporal Sequence: GRU",
+            "• Spatial features: ResNet50",
+            "• Temporal sequence: GRU",
+            "• Local video analysis",
         ]
         for spec in specs:
             ctk.CTkLabel(
@@ -170,7 +179,7 @@ class DeepFakeApp(ctk.CTk):
 
         self.file_label = ctk.CTkLabel(
             top_bar,
-            text="No video selected — Upload an MP4, AVI, or MOV file to begin",
+            text="Select an MP4, AVI, MOV, or MKV video to begin",
             font=("Segoe UI", 14),
             text_color=self.colors["text_dim"],
             anchor="w",
@@ -203,13 +212,16 @@ class DeepFakeApp(ctk.CTk):
         self.preview_frame.pack(fill="both", expand=True)
         self.preview_frame.pack_propagate(False)
 
-        # Native 1:1 Pixel Canvas (prevents Windows DPI zoom-in)
+        # Use a native canvas so preview dimensions are measured in pixels.
         self.video_canvas = tk.Canvas(
             self.preview_frame,
             bg="#050811",
             highlightthickness=0,
             bd=0,
         )
+
+        self.preview_item = self.video_canvas.create_image(0, 0, anchor="center")
+        self.video_canvas.bind("<Configure>", self.render_preview)
 
         # Standby placeholders
         self.preview_display = ctk.CTkLabel(
@@ -234,19 +246,11 @@ class DeepFakeApp(ctk.CTk):
 
         self.progress_label = ctk.CTkLabel(
             progress_header,
-            text="Inference Progress",
+            text="Ready to analyze",
             font=("Segoe UI", 12),
             text_color=self.colors["text_dim"],
         )
         self.progress_label.pack(side="left")
-
-        self.progress_percent = ctk.CTkLabel(
-            progress_header,
-            text="0%",
-            font=("Consolas", 12, "bold"),
-            text_color=self.colors["cyan"],
-        )
-        self.progress_percent.pack(side="right")
 
         self.progress_bar = ctk.CTkProgressBar(
             main_frame,
@@ -276,13 +280,22 @@ class DeepFakeApp(ctk.CTk):
             font=("Segoe UI", 26, "bold"),
             text_color="#475569",
         )
-        self.result_label.place(relx=0.5, rely=0.5, anchor="center")
+        self.result_label.place(relx=0.5, rely=0.40, anchor="center")
+
+        self.result_detail = ctk.CTkLabel(
+            self.result_frame,
+            text="",
+            font=("Segoe UI", 12),
+            text_color=self.colors["text"],
+            wraplength=650,
+        )
+        self.result_detail.place(relx=0.5, rely=0.73, anchor="center")
 
     def stop_video_stream(self):
         self.is_playing = False
-        if self.after_id is not None:
-            self.after_cancel(self.after_id)
-            self.after_id = None
+        if self.playback_job is not None:
+            self.after_cancel(self.playback_job)
+            self.playback_job = None
         if self.cap is not None:
             self.cap.release()
             self.cap = None
@@ -295,117 +308,102 @@ class DeepFakeApp(ctk.CTk):
         if not file_path:
             return
 
-        self.stop_video_stream()
-        self.video_path = file_path
-        filename = os.path.basename(file_path)
-
-        # Open video stream for real-time 1.0x embedded playback
-        self.cap = cv2.VideoCapture(file_path)
-        if self.cap.isOpened():
-            fps = self.cap.get(cv2.CAP_PROP_FPS)
-            width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-            height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-            self.total_frames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
-
-            if not fps or fps <= 0 or fps > 120:
-                fps = 30.0
-            self.fps = fps
-
-            self.file_label.configure(
-                text=f"📄 {filename}   |   {width}×{height} • {fps:.0f} FPS",
-                text_color=self.colors["text"],
-            )
-
-            # Switch from standby labels to native video canvas
-            self.preview_display.place_forget()
-            self.preview_subtext.place_forget()
-            self.video_canvas.pack(fill="both", expand=True, padx=6, pady=6)
-            self.update_idletasks()
-
-            self.current_frame_pos = 0
-            self.play_start_time = time.perf_counter()
-            self.paused_elapsed = 0.0
-            self.is_playing = True
-
-            self.btn_toggle_play.configure(state="normal", text="⏸ Pause")
-            self.update_video_frame()
-        else:
-            self.file_label.configure(
-                text=f"⚠️ Failed to open video: {filename}",
-                text_color=self.colors["danger"],
+        capture = None
+        try:
+            capture = cv2.VideoCapture(file_path)
+            ok, frame = capture.read()
+        except cv2.error:
+            LOGGER.exception("Could not open the video preview")
+            ok = False
+        if not ok:
+            if capture is not None:
+                capture.release()
+            messagebox.showerror(
+                "Could not open video",
+                "The selected file contains no readable frames. Check the file and its codec.",
+                parent=self,
             )
             return
 
-        # Reset UI states for new video
+        self.stop_video_stream()
+        self.video_path = file_path
+        self.cap = capture
+        fps = capture.get(cv2.CAP_PROP_FPS)
+        self.fps = fps if math.isfinite(fps) and 0 < fps <= 240 else 30.0
+        height, width = frame.shape[:2]
+        self.file_label.configure(
+            text=f"📄 {Path(file_path).name}   |   {width}×{height} • {self.fps:.0f} FPS",
+            text_color=self.colors["text"],
+        )
+
+        self.preview_display.place_forget()
+        self.preview_subtext.place_forget()
+        self.video_canvas.pack(fill="both", expand=True, padx=6, pady=6)
+        self.preview_image = frame
+        self.render_preview()
+
+        self.current_frame_pos = 0
+        self.paused_elapsed = 0.0
+        self.toggle_playback()
+
         self.btn_analyze.configure(state="normal")
-        self.preview_frame.configure(border_color=self.colors["cyan"])
-        self.result_frame.configure(
-            fg_color=self.colors["panel"],
-            border_width=1,
-            border_color="#1E293B",
-        )
-        self.result_label.configure(
-            text="READY FOR ANALYSIS",
-            text_color=self.colors["cyan"],
-        )
+        self.btn_toggle_play.configure(state="normal")
+        self.update_result("READY FOR ANALYSIS", "", "cyan", "panel")
         self.status_badge.configure(
             text="● System Status: Video Loaded",
             text_color=self.colors["cyan"],
         )
-        self.update_progress(0.0)
+        self.progress_label.configure(text="Ready to analyze")
+        self.progress_bar.set(0)
+
+    def render_preview(self, _event=None):
+        if self.preview_image is None:
+            return
+        canvas_width = self.video_canvas.winfo_width()
+        canvas_height = self.video_canvas.winfo_height()
+        if canvas_width <= 1 or canvas_height <= 1:
+            return
+
+        height, width = self.preview_image.shape[:2]
+        scale = min(canvas_width / width, canvas_height / height)
+        size = (max(int(width * scale), 1), max(int(height * scale), 1))
+        resized = cv2.resize(self.preview_image, size)
+        frame_rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
+        self.photo_image = ImageTk.PhotoImage(image=Image.fromarray(frame_rgb))
+        self.video_canvas.coords(self.preview_item, canvas_width // 2, canvas_height // 2)
+        self.video_canvas.itemconfigure(self.preview_item, image=self.photo_image)
 
     def update_video_frame(self):
+        self.playback_job = None
         if not self.is_playing or self.cap is None:
             return
 
-        # Sync frame position with real-world wall clock for exact 1.0x speed
         elapsed = time.perf_counter() - self.play_start_time
         target_frame = int(elapsed * self.fps)
+        if target_frame > self.current_frame_pos:
+            while self.current_frame_pos + 1 < target_frame:
+                if not self.cap.grab():
+                    break
+                self.current_frame_pos += 1
 
-        if self.total_frames > 0 and target_frame >= self.total_frames:
-            self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-            self.play_start_time = time.perf_counter()
-            self.current_frame_pos = 0
-            target_frame = 0
+            ok, frame = self.cap.read()
+            if ok:
+                self.current_frame_pos += 1
+            else:
+                # Use decoding to detect the actual end, even if metadata is inaccurate.
+                self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                ok, frame = self.cap.read()
+                if not ok:
+                    self.stop_video_stream()
+                    self.btn_toggle_play.configure(state="disabled", text="▶️ Play")
+                    return
+                self.current_frame_pos = 0
+                self.play_start_time = time.perf_counter()
 
-        # Skip intermediate frames if rendering took slightly longer
-        while self.current_frame_pos < target_frame:
-            if not self.cap.grab():
-                break
-            self.current_frame_pos += 1
+            self.preview_image = frame
+            self.render_preview()
 
-        ret, frame = self.cap.read()
-        if not ret:
-            self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-            self.play_start_time = time.perf_counter()
-            self.current_frame_pos = 0
-            ret, frame = self.cap.read()
-
-        if ret:
-            self.current_frame_pos += 1
-            cw = self.video_canvas.winfo_width()
-            ch = self.video_canvas.winfo_height()
-
-            if cw > 10 and ch > 10:
-                h, w = frame.shape[:2]
-                scale = min(cw / w, ch / h)
-                new_w = max(int(w * scale), 1)
-                new_h = max(int(h * scale), 1)
-
-                resized = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
-                frame_rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
-                img = Image.fromarray(frame_rgb)
-                self.photo_image = ImageTk.PhotoImage(image=img)
-
-                self.video_canvas.delete("all")
-                self.video_canvas.create_image(
-                    cw // 2,
-                    ch // 2,
-                    image=self.photo_image,
-                    anchor="center",
-                )
-
-        self.after_id = self.after(15, self.update_video_frame)
+        self.playback_job = self.after(15, self.update_video_frame)
 
     def toggle_playback(self):
         if self.cap is None:
@@ -413,9 +411,9 @@ class DeepFakeApp(ctk.CTk):
         if self.is_playing:
             self.is_playing = False
             self.paused_elapsed = time.perf_counter() - self.play_start_time
-            if self.after_id is not None:
-                self.after_cancel(self.after_id)
-                self.after_id = None
+            if self.playback_job is not None:
+                self.after_cancel(self.playback_job)
+                self.playback_job = None
             self.btn_toggle_play.configure(text="▶️ Play")
         else:
             self.is_playing = True
@@ -423,101 +421,97 @@ class DeepFakeApp(ctk.CTk):
             self.btn_toggle_play.configure(text="⏸ Pause")
             self.update_video_frame()
 
-    def update_progress(self, value):
-        self.progress_bar.set(value)
-        self.progress_percent.configure(text=f"{int(value * 100)}%")
-
     def start_analysis(self):
-        if not self.video_path:
+        if not self.video_path or self.analysis_job is not None:
             return
 
-        # Pause preview playback during inference to allocate full CPU to TensorFlow
+        self.resume_after_analysis = self.is_playing
         if self.is_playing:
             self.toggle_playback()
-
         self.btn_analyze.configure(state="disabled", text="⏳   ANALYZING...")
         self.btn_select.configure(state="disabled")
         self.btn_toggle_play.configure(state="disabled")
+        self.status_badge.configure(text="● System Status: Analyzing", text_color=self.colors["cyan"])
+        self.update_result("ANALYZING VIDEO", "", "cyan", "panel")
+        self.progress_label.configure(text="Starting analysis")
+        self.progress_bar.configure(mode="indeterminate")
+        self.progress_bar.start()
 
-        self.status_badge.configure(
-            text="● System Status: Running AI...",
-            text_color=self.colors["cyan"],
-        )
-        self.result_label.configure(
-            text="EXTRACTING FACES & ANALYZING FRAMES...",
-            font=("Segoe UI", 20, "bold"),
-            text_color=self.colors["cyan"],
-        )
+        Thread(target=self.run_logic, args=(self.video_path,), daemon=True).start()
+        self.analysis_job = self.after(50, self.poll_analysis)
 
-        Thread(target=self.run_logic, daemon=True).start()
-
-    def run_logic(self):
+    def run_logic(self, video_path):
         try:
-            for i in range(1, 4):
-                time.sleep(0.25)
-                val = i / 10
-                self.after(0, lambda v=val: self.update_progress(v))
-
-            label, confidence = classify_video(self.video_path)
-
-            for i in range(4, 11):
-                time.sleep(0.08)
-                val = i / 10
-                self.after(0, lambda v=val: self.update_progress(v))
-
-            self.after(0, lambda: self.show_result(label, confidence))
-
-        except Exception as e:
-            print(f"Analysis error: {e}")
-            self.after(
-                0,
-                lambda: self.file_label.configure(
-                    text="⚠️ Error occurred during video analysis!",
-                    text_color=self.colors["danger"],
-                ),
+            result = classify_video(
+                video_path,
+                on_stage=lambda stage: self.analysis_events.put(("stage", stage)),
             )
-            self.after(0, self.reset_buttons)
-
-    def show_result(self, label, confidence):
-        percentage = f"{confidence * 100:.1f}%"
-
-        if label == "real":
-            text = f"✅  AUTHENTIC (REAL)   •   Confidence: {percentage}"
-            color = self.colors["accent"]
-            bg_color = self.colors["accent_bg"]
+        except AnalysisError as exc:
+            LOGGER.warning("Analysis failed: %s", exc, exc_info=exc.__cause__ is not None)
+            self.analysis_events.put(("error", str(exc)))
+        except Exception:
+            LOGGER.exception("Unexpected analysis error")
+            self.analysis_events.put(("error", "An unexpected error occurred during analysis."))
         else:
-            text = f"🚨  DEEPFAKE DETECTED (FAKE)   •   Confidence: {percentage}"
-            color = self.colors["danger"]
-            bg_color = self.colors["danger_bg"]
+            self.analysis_events.put(("result", result))
 
-        self.result_label.configure(
-            text=text,
-            font=("Segoe UI", 26, "bold"),
-            text_color=color,
-        )
+    def poll_analysis(self):
+        self.analysis_job = None
+        try:
+            while True:
+                event, value = self.analysis_events.get_nowait()
+                if event == "stage":
+                    self.progress_label.configure(text=value)
+                else:
+                    self.finish_analysis(event, value)
+                    return
+        except Empty:
+            self.analysis_job = self.after(50, self.poll_analysis)
+
+    def update_result(self, title, detail, color, background):
+        self.result_label.configure(text=title, text_color=self.colors[color])
+        self.result_detail.configure(text=detail)
         self.result_frame.configure(
-            fg_color=bg_color,
-            border_width=2,
-            border_color=color,
+            fg_color=self.colors[background],
+            border_color=self.colors[color],
         )
-        self.preview_frame.configure(border_color=color)
+        self.preview_frame.configure(border_color=self.colors[color])
+
+    def finish_analysis(self, event, value):
+        success = event == "result"
+        self.progress_bar.stop()
+        self.progress_bar.configure(mode="determinate")
+        self.progress_bar.set(1 if success else 0)
+        self.progress_label.configure(text="Analysis complete" if success else "Analysis failed")
+
+        if success:
+            detail = (
+                f"Model fake score {value.fake_score:.4f}"
+                f"  •  {value.sampled_frames}/{SEQUENCE_LENGTH} frames sampled"
+            )
+            if value.label == "fake":
+                self.update_result("LIKELY FAKE", detail, "danger", "danger_bg")
+            else:
+                self.update_result("LIKELY REAL", detail, "accent", "accent_bg")
+        else:
+            self.update_result("COULD NOT ANALYZE", value, "danger", "panel")
+
         self.status_badge.configure(
-            text="● System Status: Analysis Complete",
-            text_color=color,
+            text="● System Status: Complete" if success else "● System Status: Error",
+            text_color=self.colors["cyan"] if success else self.colors["danger"],
         )
-
-        self.reset_buttons()
-
-        # Resume embedded video playback automatically
-        if self.cap is not None and not self.is_playing:
-            self.toggle_playback()
-
-    def reset_buttons(self):
         self.btn_analyze.configure(state="normal", text="⚡   START ANALYSIS")
         self.btn_select.configure(state="normal")
-        self.btn_toggle_play.configure(state="normal")
+        if self.cap is not None:
+            self.btn_toggle_play.configure(state="normal")
+            if self.resume_after_analysis:
+                self.toggle_playback()
 
     def on_closing(self):
+        if self.analysis_job is not None:
+            self.after_cancel(self.analysis_job)
+            self.analysis_job = None
+            self.progress_bar.stop()
         self.stop_video_stream()
         self.destroy()
 

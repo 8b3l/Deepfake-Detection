@@ -1,79 +1,64 @@
-# 🛡️ DeepFake Video Detection System
+# Deepfake Video Detection
 
-An end-to-end **AI Video Forensics** desktop application designed to detect manipulated and synthetic human faces in video streams using a hybrid **Spatiotemporal Deep Learning** pipeline (**MTCNN + ResNet50 + GRU**).
+A desktop app for screening videos for signs of facial manipulation. The app previews a local video, runs an existing ResNet50 + GRU model, and displays the model's score alongside a preliminary classification.
 
----
+## Run the desktop app
 
-##  Application Preview
+Use Python 3.11–3.13. The following commands are for Windows PowerShell. Clone from a short path such as `C:\src` if Windows reports a path-length error when installing TensorFlow.
 
-<img width="2880" height="1819" alt="Screenshot (231)" src="https://github.com/user-attachments/assets/86f3b33e-ec71-4a05-b604-d476cc9c4a00" />
-
-
-
----
-
-##  Model Architecture & Pipeline
-
-The system analyzes videos across both spatial (frame-level visual artifacts) and temporal (inter-frame motion inconsistencies) dimensions:
-
-1. **Face Detection & Alignment (`MTCNN`):** Locates, crops, and aligns facial regions across sampled video frames to eliminate background noise.
-2. **Spatial Feature Extraction (`ResNet50`):** Extracts deep visual embeddings from each aligned face frame to capture subtle blending and texture anomalies.
-3. **Temporal Sequence Modeling (`GRU`):** Processes the sequence of frame embeddings over time using Gated Recurrent Units to classify the video as **Authentic (`REAL`)** or **Manipulated (`FAKE`)** with a confidence score.
-4. **Desktop Forensics UI (`CustomTkinter` & `OpenCV`):** Provides real-time 1.0x embedded video playback, live inference progress tracking, and clear visual verdict banners.
-
----
-
-##  Project Structure
-
-```text
-Deepfake-Detection/
-├── app.py               # Main CustomTkinter GUI & real-time embedded video player
-├── processor.py         # Face extraction (MTCNN) and ResNet50 + GRU inference pipeline
-├── video_player.py      # Auxiliary video stream handling utilities
-├── requirements.txt     # Python dependencies
-└── .gitignore           # Excludes large weights, datasets, and cache files
-```
-
----
-
-##  Installation & Setup
-
-### 1. Clone the Repository
-```bash
-git clone [https://github.com/8b3l/Deepfake-Detection.git](https://github.com/8b3l/Deepfake-Detection.git)
+```powershell
+git clone https://github.com/8b3l/Deepfake-Detection.git
 cd Deepfake-Detection
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
-### 2. Install Dependencies
-Make sure you have **Python 3.10+** installed, then run:
-```bash
-pip install -r requirements.txt
+Download [`Model.keras` (280 MiB)](https://github.com/8b3l/Deepfake-Detection/releases/download/v1.0.0/Model.keras) from the [v1.0.0 release](https://github.com/8b3l/Deepfake-Detection/releases/tag/v1.0.0) and place it beside `app.py`.
+
+```powershell
+.\.venv\Scripts\python.exe app.py
 ```
 
-### 3. Download the Pre-trained Model Weights
-Because of file size limits, the trained model weights are hosted in the repository's **Releases** section:
-1. Go to the [**Releases (v1.0.0)**](https://github.com/8b3l/Deepfake-Detection/releases/tag/v1.0.0) page.
-2. Download **`Model.keras`** (`280 MB`).
-3. Place `Model.keras` directly inside the root `Deepfake-Detection/` folder alongside `app.py`.
+Select a video and click **Start Analysis**. MP4, AVI, MOV, and MKV files can be selected. Playback and analysis depend on the codecs available through OpenCV. Video processing runs locally.
 
-### 4. Run the Application
-```bash
-python app.py
+## Model and results
+
+- The released Keras file contains the ResNet50 frame encoder, a GRU for temporal modeling, and a single sigmoid output. The app restores the saved architecture and weights and handles the older Keras format used by v1.0.0.
+- Analysis reads the first 76 frames at most, sampling every fifth frame for a sequence of 16 RGB frames resized to 224 × 224. Pixel values are scaled to 0–1. If a short video yields fewer frames, its last sampled frame is repeated. The pipeline uses whole frames.
+- The app follows the repository's existing label convention. A score of 0.5 or higher is labeled **Likely Fake**. A lower score is labeled **Likely Real**. The displayed number is the model's raw output. The release does not document its training label mapping, preprocessing, or calibration, and this threshold is provisional.
+- Edits outside the sampled interval may be missed. Audio is outside the scope of this model. Treat results as preliminary.
+
+## Evaluate on labeled videos
+
+Prepare a CSV with one row per video. Relative paths are resolved from the CSV's folder.
+
+```csv
+path,label
+videos/clip-01.mp4,real
+videos/clip-02.mp4,fake
 ```
 
----
+```powershell
+.\.venv\Scripts\python.exe evaluate.py evaluation.csv
+```
 
-##  Tech Stack
+The JSON report gives the video count, confusion matrix, precision, recall, F1, and false-positive rate. To compare thresholds, pass `--threshold` on a validation set and report the selected threshold on a separate test set. Keep each source video and its derivatives in the same split. When identities are known, group those by split as well. Use clips independent of training when reporting test performance.
 
-* **Deep Learning & Vision:** TensorFlow, Keras, ResNet50, GRU, MTCNN, OpenCV, Pillow, NumPy
-* **User Interface:** CustomTkinter, Tkinter
-* **Language:** Python 3
+Run the regression tests with:
 
----
+```powershell
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+```
 
-##  Author
+## Project files
+
+- `app.py` — CustomTkinter interface and embedded OpenCV video playback
+- `processor.py` — video sampling, Keras model loading, and inference
+- `evaluate.py` — evaluation on labeled videos
+- `tests/` — regression tests for inference and evaluation
+
+## Author
 
 **Ammar Bassam Saleh**  
 Computer Engineering Graduate | AI & Machine Learning Engineer  
-* **GitHub:** [@8b3l](https://github.com/8b3l)  
-* **LinkedIn:** [linkedin.com/in/ammarsaleh11](https://www.linkedin.com/in/ammarsaleh11)
+[GitHub](https://github.com/8b3l) · [LinkedIn](https://www.linkedin.com/in/ammarsaleh11)

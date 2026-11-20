@@ -1,103 +1,158 @@
-import os
+"""Video sampling and inference for the released deepfake detector."""
+
+from collections.abc import Callable
+from dataclasses import dataclass
+from functools import lru_cache
+import json
+from pathlib import Path
+from zipfile import ZipFile
+
 import cv2
 import numpy as np
-import tensorflow as tf
-from tensorflow.keras.models import Model
-from tensorflow.keras.applications import ResNet50
-from tensorflow.keras.layers import Input, TimeDistributed, GlobalAveragePooling2D, GRU, Dropout, Dense, Bidirectional, BatchNormalization
-from tensorflow.keras import regularizers
 
-def create_model():
-    # نفس هيكل المودل السابق تماماً
-    input_layer = Input(shape=(16, 224, 224, 3), name="video_input")
-    cnn_base = ResNet50(weights=None, include_top=False, input_shape=(224, 224, 3), name="resnet50_base")
-    for layer in cnn_base.layers[:-20]: layer.trainable = False
-    time_distributed_cnn = TimeDistributed(cnn_base, name="time_distributed_resnet50")(input_layer)
-    time_distributed_gap = TimeDistributed(GlobalAveragePooling2D(), name="time_distributed_gap")(time_distributed_cnn)
-    bidirectional_gru_1 = Bidirectional(GRU(256, return_sequences=True), name="bidirectional_gru_1")(time_distributed_gap)
-    batch_norm_1 = BatchNormalization(name="batch_norm_1")(bidirectional_gru_1)
-    dropout_1 = Dropout(0.5, name="dropout_1")(batch_norm_1)
-    bidirectional_gru_2 = Bidirectional(GRU(128, return_sequences=False), name="bidirectional_gru_2")(dropout_1)
-    batch_norm_2 = BatchNormalization(name="batch_norm_2")(bidirectional_gru_2)
-    dropout_2 = Dropout(0.5, name="dropout_2")(batch_norm_2)
-    dense_1 = Dense(64, activation='relu', kernel_regularizer=regularizers.l2(0.01), name="dense_1")(dropout_2)
-    dropout_3 = Dropout(0.5, name="dropout_3")(dense_1)
-    output_layer = Dense(1, activation='sigmoid', name="output")(dropout_3)
-    model = Model(inputs=input_layer, outputs=output_layer, name="deepfake_detection_model")
+
+MODEL_PATH = Path(__file__).resolve().with_name("Model.keras")
+SEQUENCE_LENGTH = 16
+FRAME_STRIDE = 5
+FRAME_SIZE = (224, 224)
+DEFAULT_THRESHOLD = 0.5
+
+
+class AnalysisError(RuntimeError):
+    """An analysis could not produce a valid result."""
+
+
+@dataclass(frozen=True)
+class VideoAnalysis:
+    fake_score: float
+    sampled_frames: int
+
+    @property
+    def label(self) -> str:
+        return "fake" if self.fake_score >= DEFAULT_THRESHOLD else "real"
+
+
+def _load_legacy_model(keras, path: Path):
+    """Adapt the released Keras 3.3 archive to current Keras serializers."""
+    with ZipFile(path) as archive:
+        config = json.loads(archive.read("config.json"))
+    if config["class_name"] != "Sequential":
+        raise ValueError("Expected a legacy Sequential model.")
+
+    input_layer, wrapper, *_ = config["config"]["layers"]
+    shape = input_layer["config"]["batch_shape"]
+    encoder = wrapper["config"]["layer"]
+    if (
+        input_layer["class_name"] != "InputLayer"
+        or shape != [None, None, *FRAME_SIZE, 3]
+        or wrapper["class_name"] != "TimeDistributed"
+        or encoder["class_name"] != "Functional"
+    ):
+        raise ValueError("Unexpected architecture in the legacy model.")
+
+    # The old serializer wrapped the encoder's single input and output in lists.
+    # TimeDistributed expects a single tensor shape from the frame encoder.
+    endpoints = encoder["config"]
+    for key in ("input_layers", "output_layers"):
+        refs = endpoints[key]
+        if len(refs) != 1 or not isinstance(refs[0], list) or len(refs[0]) != 3:
+            raise ValueError("Unexpected input or output in the legacy frame encoder.")
+        endpoints[key] = refs[0]
+
+    fixed_shape = [None, SEQUENCE_LENGTH, *FRAME_SIZE, 3]
+    input_layer["config"]["batch_shape"] = fixed_shape
+    for entry in (config, wrapper):
+        build_config = entry.get("build_config", {})
+        if build_config.get("input_shape") == shape:
+            build_config["input_shape"] = fixed_shape
+
+    config.pop("compile_config", None)
+    model = keras.models.model_from_json(json.dumps(config))
+    model.load_weights(path, skip_mismatch=False)
     return model
 
-model_path = os.path.join(os.path.dirname(__file__), "Model.keras")
 
-# تحميل هادئ
-print("Loading model...")
-model = create_model()
-try:
-    model.load_weights(model_path, skip_mismatch=True)
-except:
-    pass
+@lru_cache(maxsize=1)
+def _load_model(path: Path):
+    if not path.is_file():
+        raise AnalysisError(f"Model file not found: {path.name}. See the setup instructions.")
 
-def classify_video(video_path):
     try:
-        # 1. استخراج اسم الملف للتحقق الذكي
-        filename = os.path.basename(video_path).lower()
-        
-        cap = cv2.VideoCapture(video_path)
-        frames = []
-        frame_count = 0
-        while True:
-            success, frame = cap.read()
-            if not success: break
-            if frame_count % 5 == 0:
-                frame = cv2.resize(frame, (224, 224))
-                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                frame = frame / 255.0
-                frames.append(frame)
-            frame_count += 1
-            if len(frames) >= 16: break
-        cap.release()
-        while len(frames) < 16: frames.append(frames[-1])
-        X = np.array(frames[:16])
-        X = np.expand_dims(X, axis=0) 
+        # TensorFlow startup and deserialization can take time on a desktop CPU.
+        from tensorflow import keras
 
-        # 2. الحصول على تنبؤ المودل
-        raw_prediction = model.predict(X, verbose=0)[0][0]
-        print(f"DEBUG: Model Raw Score: {raw_prediction:.4f}")
+        try:
+            model = keras.models.load_model(path, compile=False)
+        except ValueError:
+            model = _load_legacy_model(keras, path)
+    except Exception as exc:
+        raise AnalysisError(f"Could not load {path.name}. Check the model file and try again.") from exc
 
-        # 3. المنطق الهجين (Hybrid Logic) لضمان العرض
-        # هذا الجزء يصحح المودل إذا أخطأ بناءً على نمط اسم الملف في Celeb-DF
-        
-        final_score = raw_prediction
-        
-        # نمط التزييف في Celeb-DF عادة يحتوي على "id" مرتين (مثلاً id0_id2)
-        # أو يحتوي على كلمات مفتاحية
-        is_likely_fake = ("id" in filename and filename.count("_") >= 2) or ("fake" in filename) or ("synthesis" in filename)
-        
-        if is_likely_fake:
-            # إذا كان الملف يبدو مزيفاً والمودل أعطى رقماً منخفضاً (خطأ)، نرفعه
-            if final_score < 0.55: 
-                print("DEBUG: Auto-correcting FAKE video...")
-                final_score = 0.85 + (final_score * 0.1) # نضمن أنه فوق 0.85
-        else:
-            # إذا كان الملف يبدو حقيقياً، نخفض الرقم لضمان الـ Real
-            if final_score > 0.45:
-                print("DEBUG: Auto-correcting REAL video...")
-                final_score = 0.15 + (final_score * 0.1) # نضمن أنه تحت 0.30
+    input_shape = tuple(model.inputs[0].shape) if len(model.inputs) == 1 else ()
+    if (
+        len(input_shape) != 5
+        or input_shape[0] not in (None, 1)
+        or input_shape[1] not in (None, SEQUENCE_LENGTH)
+        or input_shape[2:] != (*FRAME_SIZE, 3)
+        or len(model.outputs) != 1
+        or tuple(model.outputs[0].shape[1:]) != (1,)
+    ):
+        raise AnalysisError("The model has an incompatible video input or classification output.")
+    return model
 
-        # 4. إعداد النتيجة النهائية للعرض
-        if final_score > 0.50:
-            label = "fake"
-            # معادلة تجميل النسبة (بين 92% و 99%)
-            confidence = 0.92 + (final_score * 0.07)
-        else:
-            label = "real"
-            # معادلة تجميل النسبة (بين 92% و 99%)
-            confidence = 0.92 + ((1 - final_score) * 0.07)
 
-        # حدود الأمان
-        if confidence > 0.99: confidence = 0.99
-            
-        return label, float(confidence)
+def _video_batch(video_path: str | Path) -> tuple[np.ndarray, int]:
+    frames = []
+    try:
+        capture = cv2.VideoCapture(str(video_path))
+        try:
+            if not capture.isOpened():
+                raise AnalysisError("Could not open the video. Check the file and its codec.")
 
-    except Exception as e:
-        print(f"Error: {e}")
-        return "error", 0.0
+            for index in range(1 + (SEQUENCE_LENGTH - 1) * FRAME_STRIDE):
+                ok, frame = capture.read()
+                if not ok:
+                    break
+                if index % FRAME_STRIDE == 0:
+                    resized = cv2.resize(frame, FRAME_SIZE)
+                    rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
+                    frames.append(rgb)
+        finally:
+            capture.release()
+    except cv2.error as exc:
+        raise AnalysisError("Could not decode the video. Check the file and its codec.") from exc
+
+    if not frames:
+        raise AnalysisError("The video contains no readable frames.")
+
+    sampled_frames = len(frames)
+    frames.extend([frames[-1]] * (SEQUENCE_LENGTH - sampled_frames))
+    batch = np.asarray(frames, dtype=np.float32)[None, ...] / 255.0
+    return batch, sampled_frames
+
+
+def classify_video(
+    video_path: str | Path,
+    *,
+    model_path: str | Path = MODEL_PATH,
+    on_stage: Callable[[str], None] | None = None,
+) -> VideoAnalysis:
+    """Return the model's raw score and the number of frames sampled before padding."""
+    if on_stage:
+        on_stage("Reading video frames")
+    batch, sampled_frames = _video_batch(video_path)
+
+    if on_stage:
+        on_stage("Preparing model")
+    model = _load_model(Path(model_path).resolve())
+
+    if on_stage:
+        on_stage("Running model")
+    try:
+        scores = np.asarray(model(batch, training=False))
+    except Exception as exc:
+        raise AnalysisError("The model could not analyze this video.") from exc
+
+    if scores.shape != (1, 1) or not 0 <= scores[0, 0] <= 1:
+        raise AnalysisError("The model returned an invalid score.")
+    return VideoAnalysis(float(scores[0, 0]), sampled_frames)
